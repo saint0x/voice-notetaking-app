@@ -5,6 +5,7 @@ import (
   "fmt"
   "github.com/sashabaranov/go-openai"
   "log"
+  "strings"
 )
 
 
