@@ -1,7 +1,6 @@
 entrypoint = "main.go"
-run = ["go", "run", "."]
-
-modules = ["go-1.21:v2-20231201-3b22c78"]
+run = ["concurrently", "python ai_server.py", "go run ."]
+modules = ["go-1.21:v2-20231201-3b22c78", "python-3.10:v25-20230920-d4ad2e4"]
 
 [nix]
 channel = "stable-23_05"

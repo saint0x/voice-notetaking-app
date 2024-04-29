@@ -2,7 +2,6 @@ package main
 
 import (
   "bufio"
-  "context"
   "fmt"
   "log"
   "os"
@@ -10,6 +9,8 @@ import (
   "strings"
   "net/http"
   "path/filepath"
+  "bytes"
+  "encoding/json"
 
   "voice-notetaking-app/pkg/database/sqlite"
   "voice-notetaking-app/service/speechtotext"
@@ -18,8 +19,7 @@ import (
   "voice-notetaking-app/service/tagging"
 
 
-  
-  "github.com/sashabaranov/go-openai"
+
 )
 
 
@@ -148,44 +148,62 @@ func getAllConcepts(graph *Graph) []string {
 
 
 
+// Define the AI server URL
+const AIEndpoint = "http://localhost:5000/ai-call" // Adjust the URL and port according to your Flask server configuration
+
+// Define the PromptData struct
+type PromptData struct {
+    Prompt   string   `json:"prompt"`
+    Concepts []string `json:"concepts"`
+}
+
 // ExtractNodesEdgesVertices uses AI to extract nodes, edges, and vertices based on the provided concepts
-func ExtractNodesEdgesVertices(graph *Graph, client *openai.Client) error {
+func ExtractNodesEdgesVertices(graph *Graph, concepts []string) error {
     // Prepare system prompt
     prompt := "You are an AI assistant that is an expert at understanding context. You will take the provided concepts and extract various nodes, edges, and vertices for our knowledge graph based on sentiment. Our aim is to allow the nodes, edges, and vertices to be parsed for added context, so keep that in mind. Respond with the nodes and any potential edges or vertices you want to add to the knowledge graph. Do not respond with the words edge, nodes, vertices, just the words themselves."
 
-    // Get all concepts as a single string
-    conceptsString := strings.Join(getAllConcepts(graph), ", ")
+    // Create prompt data
+    promptData := PromptData{
+        Prompt:   prompt,
+        Concepts: concepts,
+    }
 
-    // Extract nodes, edges, and vertices
-    resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
-        Model: openai.GPT3Dot5Turbo,
-        Messages: []openai.ChatCompletionMessage{
-            {
-                Role:    openai.ChatMessageRoleUser,
-                Content: prompt + "\nConcepts: " + conceptsString,
-            },
-        },
-    })
+    // Convert prompt data to JSON
+    promptJSON, err := json.Marshal(promptData)
     if err != nil {
-        return fmt.Errorf("failed to extract nodes, edges, and vertices: %v", err)
+        return fmt.Errorf("failed to marshal prompt data: %v", err)
     }
 
-    // Check if messages are nil
-    if resp.Messages == nil {
-        return fmt.Errorf("no messages received in response")
+    // Make a POST request to the AI server
+    resp, err := http.Post(AIEndpoint, "application/json", bytes.NewBuffer(promptJSON))
+    if err != nil {
+        return fmt.Errorf("failed to make POST request: %v", err)
+    }
+    defer resp.Body.Close()
+
+    // Check the response status code
+    if resp.StatusCode != http.StatusOK {
+        return fmt.Errorf("unexpected response status code: %d", resp.StatusCode)
     }
 
-    // Process response and update the graph
-    for _, message := range resp.Messages {
-        if message.Role == openai.ChatMessageRoleAI {
-            messageContent := message.Content
-            // Then parse the message content and update the graph accordingly
-        }
+    // Decode the response JSON
+    var responseData map[string]interface{}
+    if err := json.NewDecoder(resp.Body).Decode(&responseData); err != nil {
+        return fmt.Errorf("failed to decode response JSON: %v", err)
     }
+
+  
+  // Process response and update the graph
+  message_content := responseData["content"].(string)
+  
+  // Then parse the message content and update the graph accordingly
+  if err := ParseAndUpdateGraph(graph, message_content); err != nil {
+      return fmt.Errorf("failed to parse and update graph: %v", err)
+  }
+
 
     return nil
 }
-
 
 
 
@@ -378,6 +396,61 @@ func BuildOrUpdateKnowledgeGraph(graph *Graph, noteText string, tags []string) e
 }
 
 
+
+/// ParseAndUpdateGraph parses the message content and updates the knowledge graph accordingly
+func ParseAndUpdateGraph(graph *Graph, messageContent string) error {
+    // Split the message content into lines
+    lines := strings.Split(messageContent, "\n")
+
+    // Temporary variables to store extracted node, edge, and vertex information
+    var nodes []Node
+    var edges []Edge
+    var vertices []Vertex
+
+    // Iterate over each line to extract nodes, edges, and vertices
+    for _, line := range lines {
+        // Check if the line contains information about a node
+        if strings.HasPrefix(line, "Node ID:") {
+            var node Node
+            _, err := fmt.Sscanf(line, "Node ID: %d", &node.ID)
+            if err != nil {
+                return fmt.Errorf("failed to parse node ID: %v", err)
+            }
+            // Read the subsequent lines to extract node text and concepts
+            node.Concepts = strings.Split(lines[len(nodes)*3+2], ", ")
+
+            // Append the extracted node to the temporary nodes slice
+            nodes = append(nodes, node)
+        } else if strings.HasPrefix(line, "Edge:") { // Check if the line contains information about an edge
+            var edge Edge
+            _, err := fmt.Sscanf(line, "Edge: SourceID: %d, TargetID: %d, Weight: %f", &edge.SourceID, &edge.TargetID, &edge.Weight)
+            if err != nil {
+                return fmt.Errorf("failed to parse edge: %v", err)
+            }
+            // Append the extracted edge to the temporary edges slice
+            edges = append(edges, edge)
+        } else if strings.HasPrefix(line, "Vertex:") { // Check if the line contains information about a vertex
+            var vertex Vertex
+            _, err := fmt.Sscanf(line, "Vertex: NodeID: %d, TargetID: %d, Concept: %s", &vertex.NodeID, &vertex.TargetID, &vertex.Concept)
+            if err != nil {
+                return fmt.Errorf("failed to parse vertex: %v", err)
+            }
+            // Append the extracted vertex to the temporary vertices slice
+            vertices = append(vertices, vertex)
+        }
+    }
+
+    // Update the graph with the extracted nodes, edges, and vertices
+    graph.Nodes = append(graph.Nodes, nodes...)
+    graph.Edges = append(graph.Edges, edges...)
+    graph.Vertices = append(graph.Vertices, vertices...)
+
+    return nil
+}
+
+
+
+
 // SaveGraph saves the knowledge graph to a file.
 func SaveGraph(graph *Graph, filename string) error {
   filePath := filename
@@ -408,10 +481,21 @@ func SaveGraph(graph *Graph, filename string) error {
   return nil
 }
 
+
 // LoadGraph loads the knowledge graph from the database
 func LoadGraph(filename string) (Graph, error) {
   filePath := filename
   var graph Graph
+
+  // Check if the file exists
+  if _, err := os.Stat(filePath); os.IsNotExist(err) {
+    // If the file doesn't exist, create an empty file
+    file, err := os.Create(filePath)
+    if err != nil {
+      return graph, fmt.Errorf("failed to create file: %v", err)
+    }
+    defer file.Close()
+  }
 
   // Open the file for reading
   file, err := os.Open(filePath)
